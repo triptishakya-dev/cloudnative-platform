@@ -1,0 +1,30 @@
+services:
+
+  # ── Shared PostgreSQL ────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: cloudnative        # default DB (shared user home)
+      POSTGRES_USER: cloudnative
+      POSTGRES_PASSWORD: change-me
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-db.sql:/docker-entrypoint-initdb.d/01-init-db.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cloudnative -d cloudnative"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - cloudnative
+
+networks:
+  cloudnative:
+    driver: bridge
+
+volumes:
+  postgres_data:
