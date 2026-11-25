@@ -75,6 +75,10 @@ model OutboxEvent {
   publishedAt   DateTime?    @map("published_at") @db.Timestamptz(3)
   lastError     String?      @map("last_error") @db.Text
 
+  leaseToken String? @map("lease_token") @db.Uuid
+  leaseExpiresAt DateTime? @map("lease_expires_at") @db.Timestamptz(3)
+
+  @@index([status, leaseExpiresAt])
   @@index([status, availableAt])
   @@index([aggregateType, aggregateId])
   @@map("outbox_events")
