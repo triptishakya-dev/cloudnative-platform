@@ -1,3 +1,4 @@
+import "./env.js";
 import { buildApp } from "./app.js";
 import { OutboxWorker } from "./workers/outbox.worker.js";
 
@@ -15,11 +16,19 @@ try {
   worker.start();
 
   // Graceful shutdown
+  let shuttingDown = false;
   const shutdown = async () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     app.log.info("Shutting down...");
-    worker.stop();
-    await app.close();
-    process.exit(0);
+    try {
+      await worker.stop();
+      await app.close();
+      process.exitCode = 0;
+    } catch (err) {
+      app.log.error(err, "Shutdown failed");
+      process.exitCode = 1;
+    }
   };
 
   process.on("SIGTERM", shutdown);
