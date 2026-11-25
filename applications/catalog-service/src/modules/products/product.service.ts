@@ -5,11 +5,12 @@ export class ProductService {
   constructor(private readonly prisma: PrismaClient) {}
 
   async findAll(query: ListProductsQuery) {
-    const { page = 1, limit = 20, active, search } = query;
+    const { page = 1, limit = 20, active, search, inStock, sort } = query;
     const skip = (page - 1) * limit;
 
     const where = {
       ...(active !== undefined && { active }),
+      ...(inStock && { inventoryQuantity: { gt: 0 } }),
       ...(search && {
         OR: [
           { name: { contains: search, mode: "insensitive" as const } },
@@ -19,7 +20,7 @@ export class ProductService {
     };
 
     const [items, total] = await this.prisma.$transaction([
-      this.prisma.product.findMany({ where, skip, take: limit, orderBy: { createdAt: "desc" } }),
+      this.prisma.product.findMany({ where, skip, take: limit, orderBy: sort === "low" ? [{ priceAmount: "asc" }, { id: "asc" }] : sort === "high" ? [{ priceAmount: "desc" }, { id: "asc" }] : [{ createdAt: "desc" }, { id: "asc" }] }),
       this.prisma.product.count({ where }),
     ]);
 
