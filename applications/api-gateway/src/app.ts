@@ -1,4 +1,5 @@
 import Fastify from "fastify";
+import { accountRoutes } from "./accounts/routes.js";
 import cors from "@fastify/cors";
 import { loggerOptions } from "./plugins/logger.js";
 import { authPlugin } from "./plugins/auth.js";
@@ -29,6 +30,7 @@ export function buildApp() {
 
   // ── Routes ───────────────────────────────────────────────────────────────
   app.register(healthRoutes);
+  app.register(accountRoutes);
   app.register(catalogProxy, { prefix: "/api/v1/catalog" });
   app.register(orderProxy,   { prefix: "/api/v1/orders" });
 
