@@ -46,7 +46,7 @@ function decodeJwt(token: string): JwtPayload {
 }
 
 function verifyExp(payload: JwtPayload) {
-  if (payload.exp && payload.exp * 1000 <= Date.now()) {
+  if (payload.exp * 1000 <= Date.now()) {
     throw new Error("Token expired");
   }
 }
