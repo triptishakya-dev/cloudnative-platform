@@ -42,6 +42,8 @@ export const ListProductsQuery = Type.Object({
   limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100, default: 20 })),
   active: Type.Optional(Type.Boolean()),
   search: Type.Optional(Type.String()),
+  inStock: Type.Optional(Type.Boolean()),
+  sort: Type.Optional(Type.Union([Type.Literal("latest"), Type.Literal("low"), Type.Literal("high")])),
 });
 
 export type ListProductsQuery = Static<typeof ListProductsQuery>;
