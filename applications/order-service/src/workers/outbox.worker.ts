@@ -1,115 +1,63 @@
 import type { PrismaClient } from "@cloudnative/order-prisma-client";
-import { OutboxStatus } from "@cloudnative/order-prisma-client";
-import type { Logger } from "pino";
+import type { FastifyBaseLogger } from "fastify";
+import { publishOrderEvent } from "../messaging/rabbitmq.js";
+import { PostgresOutboxStore, type OutboxStore } from "./outbox.store.js";
+import { outboxConfig } from "./outbox.config.js";
 
-const POLL_INTERVAL_MS = Number(process.env.OUTBOX_POLL_MS ?? 5_000);
-const BATCH_SIZE = Number(process.env.OUTBOX_BATCH_SIZE ?? 10);
-const MAX_ATTEMPTS = Number(process.env.OUTBOX_MAX_ATTEMPTS ?? 5);
-
-/**
- * Transactional Outbox Worker
- *
- * Polls the `outbox_events` table for PENDING events and "publishes" them.
- * Replace the `publish()` stub with your real message broker (e.g. Kafka,
- * RabbitMQ, SNS) — the rest of the retry / failure logic stays the same.
- */
 export class OutboxWorker {
-  private timer: ReturnType<typeof setInterval> | null = null;
-  private running = false;
-
+  private timer: ReturnType<typeof setInterval> | undefined;
+  private inFlight: Promise<void> | undefined;
+  private stopping = false;
+  private readonly store: OutboxStore;
+  private readonly options: ReturnType<typeof outboxConfig>;
   constructor(
-    private readonly prisma: PrismaClient,
-    private readonly log: Logger
-  ) {}
-
+    prisma: PrismaClient,
+    private readonly log: FastifyBaseLogger,
+    private readonly publish: typeof publishOrderEvent = publishOrderEvent,
+    options: { store?: OutboxStore; config?: ReturnType<typeof outboxConfig> } = {},
+  ) {
+    this.options = options.config ?? outboxConfig();
+    this.store = options.store ?? new PostgresOutboxStore(prisma, this.options);
+  }
   start() {
-    this.log.info(`OutboxWorker started (poll every ${POLL_INTERVAL_MS}ms)`);
-    this.timer = setInterval(() => this.tick(), POLL_INTERVAL_MS);
+    if (this.timer || this.stopping) return;
+    this.log.info(`OutboxWorker started (poll every ${this.options.pollMs}ms)`);
+    this.timer = setInterval(() => { void this.tick(); }, this.options.pollMs);
+    void this.tick();
   }
-
-  stop() {
-    if (this.timer) {
-      clearInterval(this.timer);
-      this.timer = null;
-    }
-    this.log.info("OutboxWorker stopped");
+  async stop() {
+    this.stopping = true;
+    clearInterval(this.timer);
+    this.timer = undefined;
+    await this.inFlight;
+    this.log.info("OutboxWorker drained and stopped");
   }
-
-  private async tick() {
-    if (this.running) return; // skip if previous tick is still running
-    this.running = true;
-
-    try {
-      // Claim a batch of PENDING events (atomic update to avoid double-processing)
-      const events = await this.prisma.$transaction(async (tx) => {
-        const batch = await tx.outboxEvent.findMany({
-          where: {
-            status: OutboxStatus.PENDING,
-            attempts: { lt: MAX_ATTEMPTS },
-            availableAt: { lte: new Date() },
-          },
-          orderBy: { createdAt: "asc" },
-          take: BATCH_SIZE,
-        });
-
-        if (batch.length === 0) return [];
-
-        await tx.outboxEvent.updateMany({
-          where: { id: { in: batch.map((e) => e.id) } },
-          data: { status: OutboxStatus.PROCESSING },
-        });
-
-        return batch;
-      });
-
-      // Process each event outside the claim transaction
-      for (const event of events) {
-        try {
-          await this.publish(event);
-
-          await this.prisma.outboxEvent.update({
-            where: { id: event.id },
-            data: {
-              status: OutboxStatus.PUBLISHED,
-              publishedAt: new Date(),
-            },
-          });
-
-          this.log.info({ eventId: event.id, type: event.eventType }, "Event published");
-        } catch (err) {
-          const nextAttempt = event.attempts + 1;
-          const failed = nextAttempt >= MAX_ATTEMPTS;
-
-          // Exponential backoff: retry after 2^attempts * 5s
-          const retryDelayMs = Math.pow(2, nextAttempt) * 5_000;
-
-          await this.prisma.outboxEvent.update({
-            where: { id: event.id },
-            data: {
-              status: failed ? OutboxStatus.FAILED : OutboxStatus.PENDING,
-              attempts: nextAttempt,
-              lastError: (err as Error).message,
-              availableAt: failed ? undefined : new Date(Date.now() + retryDelayMs),
-            },
-          });
-
-          this.log.error({ eventId: event.id, err, attempt: nextAttempt }, "Event publish failed");
-        }
+  // Exposed for deterministic integration checks and operational polling.
+  tick(): Promise<void> {
+    if (this.stopping) return Promise.resolve();
+    if (this.inFlight) return this.inFlight;
+    this.inFlight = this.runBatch().catch(err => {
+      this.log.error({ err }, "Outbox polling failed; expired leases recover on a later poll");
+    }).finally(() => { this.inFlight = undefined; });
+    return this.inFlight;
+  }
+  private async runBatch() {
+    for (let index = 0; index < this.options.batchSize && !this.stopping; index++) {
+      // Claim just the next event: no waiting batch whose leases could expire.
+      const event = await this.store.claim();
+      if (!event) return;
+      try {
+        await this.publish(event, { timeoutMs: this.options.publishTimeoutMs });
+      } catch (err) {
+        const recorded = await this.store.failed(event, err instanceof Error ? err.message : String(err));
+        this.log.error({ eventId: event.id, attempt: event.attempts, recorded, err }, "Event publish failed");
+        continue;
       }
-    } catch (err) {
-      this.log.error({ err }, "OutboxWorker tick error");
-    } finally {
-      this.running = false;
+      // DB completion failures are not broker failures. An uncertain completion
+      // is recovered after expiry and replayed with the same stable event ID.
+      const recorded = await this.store.published(event);
+      if (recorded) this.log.info({ eventId: event.id, type: event.eventType }, "Event published");
+      else this.log.warn({ eventId: event.id }, "Ownership expired; publish result not overwritten");
     }
-  }
-
-  /**
-   * Replace this stub with your actual message broker integration.
-   * e.g. Kafka producer, RabbitMQ publish, AWS SNS publish, etc.
-   */
-  private async publish(event: { eventType: string; payload: unknown }) {
-    // TODO: integrate with your broker
-    // Example: await kafkaProducer.send({ topic: event.eventType, messages: [{ value: JSON.stringify(event.payload) }] });
-    this.log.debug({ eventType: event.eventType }, "[stub] publishing event");
   }
 }
