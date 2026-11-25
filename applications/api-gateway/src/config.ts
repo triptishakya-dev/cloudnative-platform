@@ -54,3 +54,7 @@ export const config = {
 } as const;
 
 export type Config = typeof config;
+
+if (config.NODE_ENV === "production" && config.JWT_SECRET === "change-me-in-production") {
+  throw new Error("Set a strong JWT_SECRET before running in production");
+}
